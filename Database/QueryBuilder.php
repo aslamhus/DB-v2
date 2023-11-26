@@ -35,6 +35,7 @@ use PDOStatement;
 class QueryBuilder
 {
     private PDO $pdo;
+    private PDOStatement $stmt;
     private string $query = '';
     private string $table = '';
     private array $columns = [];
@@ -125,8 +126,20 @@ class QueryBuilder
         return $this;
     }
 
-
-    public function match(array  $columns, string $value, string $searchModifier, string $logicGate = ''): QueryBuilder
+    /**
+     * Match
+     * Adds a match clause to the where clause
+     *
+     * TODO: set option for partial or precise match (including * wildcards)
+     *
+     * @param array $columns
+     * @param string $value
+     * @param string $searchModifier
+     * @param string $logicGate
+     * @param bool $includeRelevance - whether to include the relevance in the select and order by relevance
+     * @return QueryBuilder
+     */
+    public function match(array  $columns, string $value, string $searchModifier, string $logicGate = '', bool $includeRelevance = true): QueryBuilder
     {
 
         // check if this is the first where clause
@@ -139,43 +152,55 @@ class QueryBuilder
         if(!in_array($searchModifier, ['IN BOOLEAN MODE', 'IN NATURAL LANGUAGE MODE', 'WITH QUERY EXPANSION', 'IN NATURAL LANGUAGE MODE WITH QUERY EXPANSION'])) {
             throw new QueryException("Invalid search modifier '".$searchModifier."'");
         }
+        // add partial or precise match
+        $value = "*".$value."*";
+        // add the match to the where clause
         $this->where('MATCH ('.implode(',', $columns).')', 'AGAINST', $value, $logicGate, $searchModifier);
         // add the match in the select to get the relevance
-        $this->matches[]  = ['MATCH ('.implode(',', $columns).') AGAINST (? '.$searchModifier.') as relevance', $value];
+        $this->matches[]  = ['MATCH ('.implode(',', $columns).') AGAINST (? '.$searchModifier.') as relevance', $value, $includeRelevance];
 
 
         return $this;
     }
 
+    /**
+     * Select match scores
+     * Adds the match scores to the select
+     *
+     * @return array
+     */
     private function selectMatchScores(): array
     {
+        // add the match scores to the select
         foreach($this->matches as $index => $match) {
-            list($select, $value) = $match;
+            list($select, $value, $includeRelevance) = $match;
+            if(!$includeRelevance) {
+                continue;
+            }
+            // add the match against to the select
             $select = str_replace('relevance', "`relevance$index`", $select);
             $this->select([$select]);
-            // push the value to be bound
             $this->pushBindValue($value);
-
-            // push relevance column as value to select
+            // add relevance to the select
             $this->select(["? as `relevance".$index."Term`"]);
-
-            // push the value to be bound
             $this->pushBindValue($value);
 
         }
-        $order = "";
-        $index = 0;
-        foreach($this->matches as $index => $match) {
-
-            $order .= "`relevance$index`";
-            if($index < count($this->matches) - 1) {
-                $order .= "+";
+        // add the sum of the relevance columns to the order by
+        if($includeRelevance) {
+            $order = "";
+            $index = 0;
+            foreach($this->matches as $index => $match) {
+                $order .= "`relevance$index`";
+                if($index < count($this->matches) - 1) {
+                    $order .= "+";
+                }
+                $index++;
             }
-            $index++;
+            $order .= " DESC";
+            // add sum of relevance columns
+            $this->order([$order]);
         }
-        $order .= " DESC";
-        // add sum of relevance columns
-        $this->order([$order]);
 
 
         return $this->matches;
@@ -258,15 +283,23 @@ class QueryBuilder
         // build the query
         $this->query = $this->buildQuery();
         // prepare the pdo query
-        $stmt =$this->pdo->prepare($this->query);
+        $this->stmt =$this->pdo->prepare($this->query);
         // bind the values
         foreach($this->bindValues as $index => $value) {
-            $stmt->bindValue($index + 1, $value);
+            $this->stmt->bindValue($index + 1, $value);
         }
         // execute the statement
-        $stmt->execute();
+        $this->stmt->execute();
 
-        return $stmt;
+        return $this->stmt;
+    }
+
+    public function getRowCount(): int
+    {
+        if(empty($this->stmt)) {
+            throw new QueryException("Failed to get row count. No query was performed.");
+        }
+        return $this->stmt->rowCount();
     }
 
 
@@ -350,17 +383,17 @@ class QueryBuilder
         $argument .= " $logicGate $column $operator ?";
         // if the argument contains a match, the value needs to be wrapped
         // in parenthesis with an optional search modifier i.e. (? IN BOOLEAN MODE)
+        // as well as optional wildcards i.e. *value*
         if(str_contains($argument, 'MATCH')) {
             $placeholder = '(?';
             if(!empty($searchModifier)) {
                 $placeholder .= ' '.$searchModifier;
             }
             $placeholder .= ')';
-            $argument = preg_replace('/\?/', '(?)', $argument, 1);
+            $argument = preg_replace('/\?/', $placeholder, $argument, 1);
         }
         // push to bindValue
         $this->pushBindValue($value);
-
         return $argument;
 
     }
@@ -404,7 +437,7 @@ class QueryBuilder
     * @param bool $withParameters - whether to include the parameters
     * @return string
     */
-    public function toString(bool $withParameters): string
+    public function toString(bool $withParameters  = true): string
     {
         if(empty($this->query)) {
             return '';
@@ -417,6 +450,18 @@ class QueryBuilder
             $queryString = preg_replace("/\?/", "'".$value."'", $queryString, 1, $index);
         }
         return $queryString;
+    }
+
+    /**
+     * Get the performance of the query
+     *
+     *
+     *
+     * @return array - the performance of the query in number of page reads
+     */
+    public function getPerformance(): array
+    {
+        return $this->pdo->query('SHOW STATUS LIKE "Last_Query_Cost"')->fetch();
     }
 }
 

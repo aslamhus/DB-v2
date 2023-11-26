@@ -72,16 +72,21 @@ class DB
     }
 
     /**
-     * Set the allow lists
+     * Set or append to the allow lists
      *
      * @param array $tableAllowList - list of tables to allow in database queries
      * @param array $columnAllowList - list of columns to allow in database queries
      * @return void
      */
-    public function setAllowList(array $tableAllowList, array $columnAllowList)
+    public function setAllowList(array $tableAllowList = [], array $columnAllowList = [])
     {
-        $this->tableAllowList = $tableAllowList;
-        $this->columnAllowList = $columnAllowList;
+
+        if(!empty($tableAllowList)) {
+            $this->tableAllowList = array_merge($this->tableAllowList, $tableAllowList);
+        }
+        if(!empty($columnAllowList)) {
+            $this->columnAllowList = array_merge($this->columnAllowList, $columnAllowList);
+        }
     }
 
     public function getPDO(): PDO
@@ -135,11 +140,12 @@ class DB
      * @param array $select - columns to select
      * @param array $columns - columns to search
      * @param array $searchTerm - the search terms
+     * @param bool $includeRelevance - include relevance in the results, and order by relevance
      *
      * @throws \Exception
      * @return QueryBuilder
      */
-    public function matchAgainst(string $table, array $select, array $columns, array $searchTerms): QueryBuilder
+    public function matchAgainst(string $table, array $select, array $columns, array $searchTerms, bool $includeRelevance = true): QueryBuilder
     {
 
         $stmt = new \PDOStatement();
@@ -156,7 +162,7 @@ class DB
 
         // validate the search term
         if(empty($searchTerms)) {
-            throw new \Exception('Failed to perform database query - no search parameters provided');
+            throw new DatabaseException('Failed to perform database query - no search parameters provided');
         }
         // build the query
         $this->query = new QueryBuilder($this->pdo);
@@ -164,7 +170,7 @@ class DB
         $this->query = $this->query->select($select)->from($table);
         // match the columns with the search terms
         foreach($searchTerms as $term) {
-            $this->query->match($columns, $term, 'IN BOOLEAN MODE', 'OR');
+            $this->query->match($columns, $term, 'IN BOOLEAN MODE', 'OR', $includeRelevance);
         }
         // return the query object
         return $this->query;
@@ -178,19 +184,18 @@ class DB
      *
      * @return array
      */
-    public function execute()
+    public function execute(): array
     {
         // validate the query
         if(empty($this->query)) {
-            throw new \Exception('Failed to perform database query - no query set');
+            throw new DatabaseException('Failed to perform database query - no query set');
         }
         // execute the query
         try {
             $stmt = $this->query->execute();
         } catch(\Exception $e) {
-            throw new \Exception('Failed to perform database query: '.$e->getMessage());
+            throw new DatabaseException('Failed to perform database query: '.$e->getMessage());
         }
-
         // return the results
         return $stmt->fetchAll();
     }
@@ -201,7 +206,7 @@ class DB
             return true;
         }
         if(!in_array($table, $this->tableAllowList)) {
-            throw new \Exception('Table not allowed');
+            throw new DatabaseException('Table not allowed');
         }
         return true;
     }
@@ -212,20 +217,47 @@ class DB
             return true;
         }
         if(!in_array($column, $this->columnAllowList)) {
-            throw new \Exception('Column not allowed: '.$column.'');
+            throw new DatabaseException('Column not allowed: '.$column.'');
         }
         return true;
+    }
+
+    public function getRowCount()
+    {
+        if(empty($this->query)) {
+            throw new DatabaseException('No query set');
+        }
+        return $this->query->getRowCount();
     }
 
     public function getLastQuery(): string
     {
         if(empty($this->query)) {
-            throw new \Exception('No query set');
+            throw new DatabaseException('No query set');
         }
-        return $this->query->getLastQuery();
+        return $this->query->toString();
+    }
+
+    public function getPerformance(): array
+    {
+        if(empty($this->query)) {
+            throw new DatabaseException('No query set');
+        }
+        return $this->query->getPerformance();
     }
 
 
 
+
+}
+
+
+class DatabaseException extends \Exception
+{
+    public function __construct(string $message, int $code  = 0, \Throwable $previous = null)
+    {
+        $message = "Database Exception: ".$message;
+        parent::__construct($message, $code, $previous);
+    }
 
 }
